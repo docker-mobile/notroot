@@ -4,6 +4,10 @@
 DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 MARKER='\033[1m[NOTROOT]\033[0m'
 cd $DIR
+
+# Check for installed packages file
+INSTALLED_FILE="$DIR/installed.ntf"
+
 which apt-get 2> /dev/null >&2
 if [ $? -eq 0 ]; then
     MODE="apt"
@@ -22,10 +26,10 @@ if [ $# -lt 2 ]; then
     echo "  notroot [search|install] package"
     echo ""
     echo "  search package:"
-    echo "		Display the search result for a package"
+    echo "    Display the search result for a package"
     echo ""
     echo "  install packages:"
-    echo "		Installs a given package"
+    echo "    Installs a given package"
     echo ""
     echo "Note: don't forget to source notroot/bashrc"
     exit 1
@@ -43,40 +47,58 @@ case $1 in
     install)
         shift
         for package in $*; do
-        echo -e "$MARKER Installing $package from $MODE..."
+            echo -e "$MARKER Installing $package from $MODE..."
             if [ "$MODE" = "apt" ]; then
                 rm -rf deb
                 mkdir deb &&
                 cd deb &&
-                which apt-rdepends > /dev/null
-                if [ $? -eq 0 ]; then
-                    echo -e "$MARKER Scanning dependencies with apt-rdepends..."
-                    for dep in `apt-rdepends $package|grep -v "^ "`; do
-                        dpkg -l $dep > /dev/null 2>&1
-                        if [ $? -eq 1 ]; then
-                            echo -e "$MARKER $dep is not present on the system, installing it locally"
-                            apt-get download $dep
+
+                declare -A installed_packages
+                if [ -f "$INSTALLED_FILE" ]; then
+                    while IFS= read -r line; do
+                        installed_packages["$line"]=1
+                    done < "$INSTALLED_FILE"
+                fi
+
+                declare -a to_install
+                to_install+=("$package")
+
+                while [ ${#to_install[@]} -gt 0 ]; do
+                    current_package="${to_install[0]}"
+                    unset to_install[0]
+
+                    if [[ -v "installed_packages[$current_package]" ]]; then
+                        echo -e "$MARKER $current_package is already installed, skipping."
+                        continue
+                    fi
+
+                    echo -e "$MARKER Checking dependencies for $current_package..."
+                    apt-cache rdepends "$current_package" | grep -v "Reverse Depends:" | grep -v "^ " | while read dep; do
+                        if [[ ! -v "installed_packages[$dep]" ]]; then
+                            to_install+=("$dep")
                         fi
                     done
-                else
-                    echo -e "$MARKER WARNING:"
-                    echo "apt-rdepends is not installed, if you want recursive"
-                    echo "         installation run the following command:"
-                    echo ""
-                    echo "notroot install apt-rdepends"
-                    echo ""
-                fi
-                apt-get download $package
+
+                    dpkg -l "$current_package" > /dev/null 2>&1
+                    if [ $? -eq 1 ]; then
+                        echo -e "$MARKER $current_package is not present on the system, downloading."
+                        apt-get download "$current_package"
+                    fi
+                done
+
                 cd .. &&
                 for deb in deb/*.deb; do
-                    dpkg -x $deb . 
+                    dpkg -x "$deb" .
+                    package_name=$(dpkg -I "$deb" | grep Package: | awk '{print $2}')
+                    echo "$package_name" >> "$INSTALLED_FILE" # Record installed package
                 done
+
             fi
             if [ "$MODE" = "yum" ]; then
                 rm -rf rpm
                 mkdir rpm &&
                 cd rpm &&
-                yumdownloader $package &&
+                yumdownloader "$package" &&
                 cd .. &&
                 rpm2cpio rpm/*.rpm | cpio -idmvu
             fi
